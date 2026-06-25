@@ -72,6 +72,9 @@ python3 expand_context.py "HandleConsumeCreateProduct" \
   --depth 3 \
   --output-dir ./contexts
 
+# Expand the main() of the command you are currently in
+python3 expand_context.py "main" --root . --depth 2
+
 # Follow third-party imports
 python3 expand_context.py "main" \
   --root ./internal/services/inventory_service \
@@ -140,6 +143,7 @@ Top-level structure:
   "projects": [
     {
       "root": "/path/to/project",
+      "symbol": "HandleConsumeCreateProduct",
       "build_mode": "precise",
       "base_context": { "status": "ok", "results": { "Node": [...], "Source": "...", "Callees": [...] }, "raw_callees": [...] },
       "plan": { ... },
@@ -215,10 +219,24 @@ The script does this by:
 
 1. Looking up the base variable type (`inventoryDeliveryBase` → `*InventoryDeliveryBase`).
 2. Parsing the struct source to find the field type (`InventoryRepository` → `contracts.InventoryRepository`).
-3. Queryying gograph implementers of that interface (`PostgresInventoryRepository`).
+3. Querying gograph implementers of that interface (`PostgresInventoryRepository`).
 4. Expanding `(*PostgresInventoryRepository).AddProductItemToInventory`.
 
 If the interface implementation lives in a different root or third-party module, resolution may fail. In that case the original chained callee remains in `raw_callees` and appears as `not_found` in the expansion tree.
+
+---
+
+## Symbol disambiguation
+
+Unqualified top-level function names such as `main` are ambiguous when several packages define them (for example, multiple commands under `cmd/`). The script resolves them automatically:
+
+1. It fetches the gograph context for the requested name.
+2. It collects exact function matches (`kind: function`, `name: <symbol>`).
+3. If there is exactly one match, it qualifies the symbol with the package path, e.g. `main` → `cmd/spoofdpi.main`. This also avoids expensive substring matching that would otherwise match names like `TestMain` or `DomainTrie`.
+4. If there are multiple matches, it prompts you interactively to choose one.
+5. In non-interactive mode it warns and uses the first match.
+
+The resolved symbol is recorded in each project's `"symbol"` field in JSON and in the Markdown output.
 
 ---
 
@@ -253,6 +271,7 @@ You can ask the LLM "what operands appear on line 33?" and it has the answer.
 | Follow only what matters | Use specific patterns, e.g. `--follow-imports "github.com/myorg/*"`. |
 | Huge monorepo | Pass the exact service directory as `--root` instead of the repo root. |
 | Avoid re-copying modules | The script reuses `/tmp/opencode/gograph_modules/` across runs. |
+| Expanding `main` | Start with `--depth 2` or `--depth 3`; depth 5 from `main` can be very large. |
 
 Typical timings on `shop-golang-microservices` (`HandleConsumeCreateProduct`, depth 3):
 

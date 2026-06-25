@@ -220,23 +220,23 @@ async def gograph_callees(symbol: str, root: Path, depth: int = 1) -> dict:
 
 async def gograph_implementers(iface: str, root: Path) -> list[str]:
     result = await run_tool([GOGRAPH_CMD, "implementers", iface, "--json"], cwd=root)
-    if result.get("status") == "raw":
+    if not result or result.get("status") == "raw":
         return []
-    return [item["name"] for item in result.get("results", [])]
+    return [item["name"] for item in (result.get("results") or [])]
 
 
 async def gograph_constructors(type_name: str, root: Path) -> list[dict]:
     result = await run_tool([GOGRAPH_CMD, "constructors", type_name, "--json"], cwd=root)
-    if result.get("status") == "raw":
+    if not result or result.get("status") == "raw":
         return []
-    return result.get("results", [])
+    return result.get("results") or []
 
 
 async def gograph_literals(type_name: str, root: Path) -> list[dict]:
     result = await run_tool([GOGRAPH_CMD, "literals", type_name, "--json"], cwd=root)
-    if result.get("status") == "raw":
+    if not result or result.get("status") == "raw":
         return []
-    return result.get("results", [])
+    return result.get("results") or []
 
 
 async def gograph_plan(symbol: str, root: Path) -> dict:
@@ -245,6 +245,91 @@ async def gograph_plan(symbol: str, root: Path) -> dict:
 
 async def gograph_explain(symbol: str, root: Path) -> dict:
     return await run_tool([GOGRAPH_CMD, "explain", symbol, "--json"], cwd=root)
+
+
+def _exact_function_matches(symbol: str, base_context: dict | None) -> list[dict]:
+    if not base_context or base_context.get("status") != "ok":
+        return []
+    results = base_context.get("results") or {}
+    if not isinstance(results, dict):
+        return []
+    nodes = results.get("Node", [])
+    if isinstance(nodes, dict):
+        nodes = [nodes]
+    return [n for n in nodes if n.get("kind") == "function" and n.get("name") == symbol]
+
+
+def _symbol_path_from_node(node: dict, project_root: Path) -> str | None:
+    file = node.get("file")
+    if not file:
+        return None
+    file_path = project_root / file
+    try:
+        rel = file_path.parent.relative_to(project_root)
+    except ValueError:
+        return None
+    if rel == Path("."):
+        return None
+    return str(rel).replace(os.sep, "/")
+
+
+async def _disambiguate_symbol(
+    symbol: str, base_context: dict, project_root: Path
+) -> str | None:
+    candidates = _exact_function_matches(symbol, base_context)
+    if len(candidates) <= 1:
+        # Use the single exact match if it can be qualified; otherwise keep the
+        # original symbol to avoid expensive substring matching.
+        if len(candidates) == 1:
+            rel_path = _symbol_path_from_node(candidates[0], project_root)
+            if rel_path:
+                return f"{rel_path}.{symbol}"
+        return symbol
+
+    if not sys.stdin.isatty():
+        print(
+            f"Warning: symbol '{symbol}' is ambiguous ({len(candidates)} matches). "
+            "Run interactively to select one; using first match.",
+            file=sys.stderr,
+        )
+        rel_path = _symbol_path_from_node(candidates[0], project_root)
+        return f"{rel_path}.{symbol}" if rel_path else symbol
+
+    print(
+        f"Symbol '{symbol}' is ambiguous. Multiple functions named '{symbol}' found:",
+        file=sys.stderr,
+    )
+    for i, node in enumerate(candidates, 1):
+        file = node.get("file", "unknown")
+        line = node.get("line", "")
+        detail = node.get("detail", "")
+        loc = f"{file}:{line}" if line else file
+        print(f"  {i}. {detail} ({loc})", file=sys.stderr)
+
+    while True:
+        try:
+            choice = await asyncio.to_thread(
+                input,
+                f"Select one (1-{len(candidates)}), or press Enter to keep '{symbol}': ",
+            )
+        except EOFError:
+            return symbol
+        choice = choice.strip()
+        if not choice:
+            return symbol
+        try:
+            idx = int(choice)
+            if 1 <= idx <= len(candidates):
+                selected = candidates[idx - 1]
+                break
+        except ValueError:
+            pass
+        print("Invalid choice. Please enter a number.", file=sys.stderr)
+
+    rel_path = _symbol_path_from_node(selected, project_root)
+    if rel_path:
+        return f"{rel_path}.{symbol}"
+    return symbol
 
 
 def _go_mod_cache(project_root: Path) -> Path:
@@ -697,8 +782,11 @@ def render_markdown(result: dict, path: Path) -> None:
 
     for project in result.get("projects", []):
         root = project.get("root", "unknown")
+        resolved_symbol = project.get("symbol", "unknown")
         build_mode = project.get("build_mode", "unknown")
-        lines.extend([f"## Project: {root}", "", f"- **Build Mode:** {build_mode}", ""])
+        lines.extend([f"## Project: {root}", ""])
+        lines.append(f"- **Symbol:** `{resolved_symbol}`")
+        lines.extend([f"- **Build Mode:** {build_mode}", ""])
 
         explain = project.get("explain", {})
         if isinstance(explain, dict):
@@ -799,19 +887,40 @@ async def _process_project(
     work_root = graph_root or root
     build_mode, warnings = await build_graph(work_root, force_precise=precise)
 
-    base_context = await gograph_context(symbol, work_root)
-    plan = await gograph_plan(symbol, work_root)
-    explain = await gograph_explain(symbol, work_root)
+    current_symbol = symbol
+    base_context = await gograph_context(current_symbol, work_root)
+    resolved_symbol = await _disambiguate_symbol(current_symbol, base_context, root)
+    if resolved_symbol != current_symbol:
+        current_symbol = resolved_symbol
+        base_context = await gograph_context(current_symbol, work_root)
+
+    if not base_context or base_context.get("status") != "ok":
+        return {
+            "root": str(root),
+            "symbol": current_symbol,
+            "build_mode": "precise" if build_mode else "heuristic",
+            "base_context": base_context
+            or {"status": "not_found", "query": current_symbol},
+            "plan": {},
+            "explain": {},
+            "expansions": {},
+            "initialization_sites": {},
+            "warnings": warnings
+            + [f"Symbol {current_symbol!r} not found in {root}"],
+        }
+
+    plan = await gograph_plan(current_symbol, work_root)
+    explain = await gograph_explain(current_symbol, work_root)
 
     # Keep every operand the LLM might need for line-level debugging, but do
     # not expand local variables / built-ins in the recursive tree.
-    callees_result = await gograph_callees(symbol, work_root, depth=1)
+    callees_result = await gograph_callees(current_symbol, work_root, depth=1)
     raw_callees = callees_result.get("results") or []
     base_context["raw_callees"] = raw_callees
 
     visited: set[tuple[str, str]] = set()
     expansion_root = await expand_symbol(
-        symbol,
+        current_symbol,
         work_root,
         depth=0,
         max_depth=depth,
@@ -825,6 +934,7 @@ async def _process_project(
 
     return {
         "root": str(root),
+        "symbol": current_symbol,
         "build_mode": "precise" if build_mode else "heuristic",
         "base_context": base_context,
         "plan": plan,
