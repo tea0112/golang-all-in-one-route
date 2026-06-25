@@ -1074,12 +1074,6 @@ async def async_main():
         render_markdown(result, md_path)
         print(f"Wrote Markdown: {md_path}", file=sys.stderr)
 
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-    except AttributeError:
-        pass
-    print(json.dumps(result, indent=2))
-
 
 def main():
     if sys.platform == "win32":
