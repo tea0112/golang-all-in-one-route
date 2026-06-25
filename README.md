@@ -228,13 +228,13 @@ If the interface implementation lives in a different root or third-party module,
 
 ## Symbol disambiguation
 
-Unqualified top-level function names such as `main` are ambiguous when several packages define them (for example, multiple commands under `cmd/`). The script resolves them automatically:
+Unqualified top-level function names such as `main` or `NewService` are ambiguous when several packages define them (for example, multiple commands under `cmd/`, or helper functions with the same name in different packages). The script resolves them automatically:
 
 1. It fetches the gograph context for the requested name.
 2. It collects exact function matches (`kind: function`, `name: <symbol>`).
-3. If there is exactly one match, it qualifies the symbol with the package path, e.g. `main` → `cmd/spoofdpi.main`. This also avoids expensive substring matching that would otherwise match names like `TestMain` or `DomainTrie`.
+3. If there is exactly one match, it qualifies the symbol with the package path, e.g. `main` → `cmd/spoofdpi.main` or `NewService` → `internal/foo.NewService`. This also avoids expensive substring matching that would otherwise match names like `TestMain` or `DomainTrie`.
 4. If there are multiple matches, it prompts you interactively to choose one.
-5. In non-interactive mode it warns and uses the first match.
+5. In non-interactive mode it warns, states the project root, and uses the first match.
 
 The resolved symbol is recorded in each project's `"symbol"` field in JSON and in the Markdown output.
 

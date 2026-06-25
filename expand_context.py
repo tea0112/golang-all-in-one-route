@@ -286,17 +286,20 @@ async def _disambiguate_symbol(
                 return f"{rel_path}.{symbol}"
         return symbol
 
+    root_label = str(project_root)
+
     if not sys.stdin.isatty():
         print(
-            f"Warning: symbol '{symbol}' is ambiguous ({len(candidates)} matches). "
-            "Run interactively to select one; using first match.",
+            f"Warning: symbol '{symbol}' is ambiguous ({len(candidates)} matches) "
+            f"in {root_label}. Run interactively to select one; using first match.",
             file=sys.stderr,
         )
         rel_path = _symbol_path_from_node(candidates[0], project_root)
         return f"{rel_path}.{symbol}" if rel_path else symbol
 
     print(
-        f"Symbol '{symbol}' is ambiguous. Multiple functions named '{symbol}' found:",
+        f"Symbol '{symbol}' is ambiguous in {root_label}. "
+        f"Multiple functions named '{symbol}' found:",
         file=sys.stderr,
     )
     for i, node in enumerate(candidates, 1):
